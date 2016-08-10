@@ -123,17 +123,23 @@ k8s_opts = [
     cfg.StrOpt('api_root',
                default=os.environ.get('K8S_API', 'http://localhost:8080')),
     cfg.StrOpt('cluster_subnet_pool',
+               help=_('Subnet pool used to grab ranges of IPs for each new '
+                      'K8s namespace. Pod IPs will be inside those ranges'),
                default=os.environ.get(
                    'SUBNET_POOL', '192.168.0.0/16')),
     # NOTE(tfukushima): FLANNEL_NET is used in the deployment scripts.
     #   https://github.com/kubernetes/kubernetes/search?utf8=%E2%9C%93&q=flannel_net  # noqa
     cfg.StrOpt('cluster_external_subnet',
+               help=_('Network range of the Floating IPs used when creating'
+                      ' services with externalIP access'),
                default=os.environ.get(
                    'FLANNEL_NET', '172.16.0.0/16')),
     # NOTE(tfukushima): SERVICE_CLUSTER_IP_RANGE is used in the deployment
     #   scripts.
     # https://github.com/kubernetes/kubernetes/search?utf8=%E2%9C%93&q=SERVICE_CLUSTER_IP_RANGE&type=Code  # noqa
     cfg.StrOpt('cluster_service_subnet',
+               help=_('Range of IPs used as K8s ClusterIPs. It must match with '
+                      'Kubernetes SERVICE_CLUSTER_IP_RANGE'),
                default=os.environ.get(
                    'SERVICE_CLUSTER_IP_RANGE', '192.168.3.0/24')),
 ]

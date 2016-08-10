@@ -31,6 +31,8 @@ _kuryr_opts = [
     ('neutron_client', config.neutron_opts),
     ('keystone_client', config.keystone_opts),
     ('binding', config.binding_opts),
+    ('raven', config.raven_opts),
+    ('k8s', config.k8s_opts)
 ]
 
 
