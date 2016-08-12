@@ -27,6 +27,8 @@ enumerate here most important, all of them included in our roadmap:
 
 - Only *ClusterIP* `service types`_ is supported.
 
+- Only one `external IP`_ is supported per service.
+
 
 .. _`Keystone Authentication`: http://kubernetes.io/docs/admin/authentication/
 .. _`Kubernetes`: http://kubernetes.io
@@ -37,3 +39,4 @@ enumerate here most important, all of them included in our roadmap:
 .. _`neutron service quota`: http://docs.openstack.org/admin-guide/cli_networking_advanced_quotas.html
 .. _`already merged`: https://github.com/kubernetes/kubernetes/pull/25638
 .. _`service types`: http://kubernetes.io/docs/user-guide/services/#publishing-services---service-types
+.. _`external IP`: http://kubernetes.io/docs/user-guide/services/#external-ips
