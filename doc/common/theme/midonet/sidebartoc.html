@@ -1,0 +1,28 @@
+<div class="col-lg-3 col-md-4 col-sm-4 col-lg-pull-9 col-md-pull-8 col-sm-pull-8 docs-sidebar">
+  <div class="search-icon show">
+    <i class="fa fa-search"></i> Search
+  </div>
+  <div class="btn-group docs-sidebar-releases">
+    <button onclick="location.href='/'" class="btn docs-sidebar-home" data-toggle="tooltip" data-placement="top" title="Docs Home"><i class="fa fa-arrow-circle-o-left"></i></button>
+    <button href="#" type="button" data-toggle="dropdown" class="btn docs-sidebar-release-select">Midonet Documentation<i class="fa fa-caret-down"></i></button>
+    <ul class="dropdown-menu docs-sidebar-dropdown" role="menu" aria-labelledby="dLabel">
+      <li role="presentation" class="dropdown-header">Guides</li>
+      <li role="presentation"><a role="menuitem" tabindex="-1" href="https://docs.midonet.org/docs/latest-en/quick-start-guide/rhel-7_mitaka-rdo/content/index.html">Midonet RDO Mitaka</a></li>
+      <li role="presentation"><a role="menuitem" tabindex="-1" href="https://docs.midonet.org/docs/latest-en/quick-start-guide/ubuntu-1604_mitaka/content/index.html">Midonet Ubuntu Mitaka</a></li>
+      <li role="presentation"><a role="menuitem" tabindex="-1" href="https://docs.midonet.org/docs/latest-en/quick-start-guide/rhel-7_liberty-rdo/content/index.html">Midonet RDO Liberty</a></li>
+      <li role="presentation"><a role="menuitem" tabindex="-1" href="https://docs.midonet.org/docs/latest-en/quick-start-guide/ubuntu-1404_liberty/content/index.html">Midonet Ubuntu Liberty</a></li>
+      <li role="presentation"><a role="menuitem" tabindex="-1" href="https://docs.midonet.org/docs/latest-en/reference-architecture/content/index.html">Midonet Reference Architecture</a></li>
+      <li role="presentation"><a role="menuitem" tabindex="-1" href="https://docs.midonet.org/docs/latest-en/operations-guide/content/index.html">Midonet Operations Guide</a></li>
+    </ul>
+  </div>
+  <div class="docs-sidebar-toc">
+    <div class="docs-sidebar-section" id="table-of-contents">
+      <a href="{{ pathto(master_doc) }}" class="docs-sidebar-section-title"><h4>{{ _('Contents') }}</h4></a>
+      {%- if theme_sidebar_mode == 'toc' %}
+      {{ toc }}
+      {%- elif theme_sidebar_mode == 'toctree' %}
+      {{ toctree(maxdepth=2) }}
+      {%- endif %}
+    </div>
+  </div>
+</div>
