@@ -43,7 +43,7 @@ VIPs of the Kubernetes entities.
 
 * :command:`cluster_external_subnet`: `public services`_ can define
   `externalIPs`_ addresses to let external access to Kubernetes services. This
-  option define what's the range of this `externalIPs`_. The network name will be
+  option define what's the range of these `externalIPs`_. The network name will be
   (not configurable yet) *raven-default-external-net*
 
 * :command:`cluster_service_subnet`: This is the range of VIPs that K8s gives

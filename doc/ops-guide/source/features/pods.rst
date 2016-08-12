@@ -89,7 +89,8 @@ Then, we can see that the Pod on Kubernetes API has the metadata according to th
                               "network_id": "8321a4a7-65f8-4e87-885d-8625549ab51c", "enable_dhcp": true, "id": "397f6de9-bee3-4e66-8056-f9e54a7ec5e0",
                               "dns_nameservers": [], "ip_version": 4, "ipv6_address_mode": null}]~
 
-Finally, we can check out the container is running and the ip address matches with the Neutorn one:
+Finally, we can check out the container is running and the ip address matches with the Neutron one:
+
 
 .. code-block:: bash
 
