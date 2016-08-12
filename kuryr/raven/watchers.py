@@ -13,7 +13,6 @@
 
 import abc
 import asyncio
-import ipaddress
 
 from neutronclient.common import exceptions as n_exceptions
 from oslo_log import log
@@ -96,7 +95,7 @@ def _get_pool_members(pool_members):
 
 @asyncio.coroutine
 def _create_floating_ip(delegator, client, ext_net_id, vip, external_ips,
-                        annotations):
+                        annotations, security_group_id):
 
     # TODO(devvesa): only one ip is considered now
     external_ip = external_ips[0]
@@ -152,11 +151,33 @@ def _create_floating_ip(delegator, client, ext_net_id, vip, external_ips,
         )
 
     fip = fip['floatingip']
-
     LOG.info(_LI('FIP "%(fip)s" associated '
                  'to a Load Balancer VIP "%(vip)s"'),
              {'vip': vip['address'],
               'fip': fip['floating_ip_address']})
+
+    # Create SG rule to give external access
+    protocol_port = vip['protocol_port']
+    protocol = vip['protocol']
+
+    try:
+        yield from delegator(
+            client.create_security_group_rule,
+            {
+                'security_group_rule': {
+                    'security_group_id': security_group_id,
+                    'direction': 'ingress',
+                    'protocol': protocol,
+                    'port_range_min': protocol_port,
+                    'port_range_max': protocol_port
+                }
+            }
+        )
+        LOG.info(_LI('SG rule for external access at VIP "%(vip)s"'),
+                 {'vip': vip['address']})
+    except n_exceptions.Conflict:
+        # There is no problem if we already allow this access
+        pass
 
     annotations.update(
         {constants.K8S_ANNOTATION_FIP_KEY:
@@ -164,11 +185,31 @@ def _create_floating_ip(delegator, client, ext_net_id, vip, external_ips,
 
 
 @asyncio.coroutine
-def _delete_floating_ip(delegator, client, a_fip, annotations=None):
+def _delete_floating_ip(delegator, client, a_fip, a_vip,
+                        security_group_id, annotations=None):
 
     yield from delegator(
         client.delete_floatingip,
         a_fip['id'])
+
+    # Delete the associated SG rule
+    protocol_port = a_vip['protocol_port']
+    protocol = a_vip['protocol']
+    sgrs = yield from delegator(
+        client.list_security_group_rules,
+        security_group_id=security_group_id,
+        protocol=protocol,
+        port_range_min=protocol_port,
+        port_range_max=protocol_port,
+        direction='ingress')
+    if sgrs:
+        sgr = sgrs['security_group_rules'][0]
+        yield from delegator(
+            client.delete_security_group_rule,
+            sgr['id'])
+        LOG.info(_LI('SG rule for external access at VIP "%(vip)s"'
+                     ' deleted'),
+                 {'vip': a_vip['address']})
 
     if annotations:
         annotations[constants.K8S_ANNOTATION_FIP_KEY] = None
@@ -840,6 +881,10 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     created_vip = yield from self.delegate(
                         self.neutron.create_vip, vip_request)
                     vip = created_vip['vip']
+                    yield from self.delegate(
+                        self.neutron.update_port, vip['port_id'],
+                        {'port': {'security_groups': [self._default_sg]}})
+                    # update the vip to the default security group
                     LOG.debug('Succeeded to created a VIP %s', vip)
                 except n_exceptions.NeutronClientException as ex:
                     LOG.error(_LE("Error happened during creating a"
@@ -858,40 +903,23 @@ class K8sServicesWatcher(K8sAPIWatcher):
 
                 # add security group rule in the default security group to
                 # allow access from the VIP to all containers
-                sgs = self.neutron.list_security_groups(
-                    name=constants.K8S_HARDCODED_SG_NAME)
-                if sgs:
-                    sg = sgs['security_groups'][0]
-                else:
+                if not self._default_sg:
                     raise Exception('Security group should be already created'
                                     ' at this point')
 
-                if ipaddress.ip_address(cluster_ip).version == 4:
-                    ip_version = 'IPv4'
-                else:
-                    ip_version = 'IPv6'
-
-                rule = {
-                    'security_group_id': sg['id'],
-                    'ethertype': ip_version,
-                    'direction': 'ingress',
-                    'remote_ip_prefix': '%s/32' % cluster_ip,
-                }
-                req = {
-                    'security_group_rule': rule,
-                }
-                LOG.debug('Creating SG rule %s', req)
-                self.neutron.create_security_group_rule(req)
-
                 if 'externalIPs' in service_spec:
 
+                    # TODO(devvesa): better security group management is
+                    # mandatory for future releases. The self._default_sg
+                    # field is a poor solution
                     yield from _create_floating_ip(
                         self.sequential_delegate,
                         self.neutron,
                         self._external_service_network['id'],
                         vip,
                         service_spec['externalIPs'],
-                        annotations)
+                        annotations,
+                        self._default_sg)
 
                 if path:
                     yield from _update_annotation(
@@ -909,10 +937,13 @@ class K8sServicesWatcher(K8sAPIWatcher):
 
                 # Existing external ip deleted
                 annotated_fip = annotations[constants.K8S_ANNOTATION_FIP_KEY]
+                annotated_vip = annotations[constants.K8S_ANNOTATION_VIP_KEY]
                 yield from _delete_floating_ip(
                     self.sequential_delegate,
                     self.neutron,
                     jsonutils.loads(annotated_fip),
+                    jsonutils.loads(annotated_vip),
+                    self._default_sg,
                     annotations)
 
                 yield from _update_annotation(
@@ -927,13 +958,18 @@ class K8sServicesWatcher(K8sAPIWatcher):
                 # not have an external ip
 
                 annotated_vip = annotations[constants.K8S_ANNOTATION_VIP_KEY]
+
+                # TODO(devvesa): better security group management is
+                # mandatory for future releases. The self._default_sg
+                # field is a poor solution
                 yield from _create_floating_ip(
                     self.sequential_delegate,
                     self.neutron,
                     self._external_service_network['id'],
                     jsonutils.loads(annotated_vip),
                     service_spec['externalIPs'],
-                    annotations)
+                    annotations,
+                    self._default_sg)
 
                 yield from _update_annotation(
                     self.delegate,
@@ -964,8 +1000,13 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     self.sequential_delegate,
                     self.neutron,
                     jsonutils.loads(annotated_fip),
+                    jsonutils.loads(annotated_vip),
+                    self._default_sg,
                     annotations)
 
+                # TODO(devvesa): better security group management is
+                # mandatory for future releases. The self._default_sg
+                # field is a poor solution
                 # Create the new one
                 yield from _create_floating_ip(
                     self.sequential_delegate,
@@ -973,7 +1014,8 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     self._external_service_network['id'],
                     jsonutils.loads(annotated_vip),
                     service_spec['externalIPs'],
-                    annotations)
+                    annotations,
+                    self._default_sg)
 
                 # Update the annotation
                 yield from _update_annotation(
@@ -996,25 +1038,6 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     LOG.debug('Deletion event without neutron VIP information.'
                               ' Ignoring it.')
                     return
-
-                # delete security group rule in the default security group for
-                # the VIP we have just deleted
-                sgs = self.neutron.list_security_groups(
-                    name=constants.K8S_HARDCODED_SG_NAME)
-                if sgs:
-                    sg = sgs['security_groups'][0]
-                else:
-                    raise Exception('Security group should be already created'
-                                    ' at this point')
-
-                vip_address = '%s/32' % neutron_vip['address']
-
-                sgrs = self.neutron.list_security_group_rules(
-                    security_group_id=sg['id'],
-                    remote_ip_prefix=vip_address)
-                if sgrs:
-                    sgr = sgrs['security_group_rules'][0]
-                    self.neutron.delete_security_group_rule(sgr['id'])
 
                 # VIP should be delete before the pool.
                 try:
@@ -1054,10 +1077,13 @@ class K8sServicesWatcher(K8sAPIWatcher):
                 if constants.K8S_ANNOTATION_FIP_KEY in annotations:
 
                     a_fip = annotations[constants.K8S_ANNOTATION_FIP_KEY]
+                    a_vip = annotations[constants.K8S_ANNOTATION_VIP_KEY]
                     yield from _delete_floating_ip(
                         self.sequential_delegate,
                         self.neutron,
-                        jsonutils.loads(a_fip))
+                        jsonutils.loads(a_fip),
+                        jsonutils.loads(a_vip),
+                        self._default_sg)
 
                 LOG.debug('Successfully deleted the Neutron pool %s',
                           neutron_pool)
