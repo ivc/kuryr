@@ -8,6 +8,7 @@ neutron:
     file: $BASE/neutron.yml
     service: neutron
   image: sandbox/neutron:liberty
+  command: ['/run-neutron-rabbit.sh']
   hostname: neutron
   links:
   - "keystone:keystone"
