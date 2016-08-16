@@ -802,11 +802,17 @@ class TestK8sServicesWatcher(TestK8sWatchersBase):
         }
         fake_vip_response = copy.deepcopy(vip_request)
         fake_vip_response['vip']['id'] = fake_vip_id
+        fake_vip_response['vip']['port_id'] = str(uuid.uuid4())
         fake_vip_response_future = self.make_future(fake_vip_response)
         self.fake_raven.delegate(
             self.fake_raven.neutron.create_vip, vip_request).AndReturn(
             fake_vip_response_future)
         fake_vip = fake_vip_response['vip']
+        self.fake_raven.delegate(
+            self.fake_raven.neutron.update_port, fake_vip['port_id'],
+            {
+                'port': {'security_groups': [self.fake_raven._default_sg]}
+            }).AndReturn([])
         annotations.update(
             {constants.K8S_ANNOTATION_VIP_KEY: jsonutils.dumps(fake_vip)})
         path = metadata['selfLink']
@@ -814,30 +820,6 @@ class TestK8sServicesWatcher(TestK8sWatchersBase):
         watchers._update_annotation(
             self.fake_raven.delegate, path, 'Service', annotations).AndReturn(
             self.none_future)
-
-        sg_id = str(uuid.uuid4())
-        fake_sg_response = {
-            'security_groups': [{
-                'id': sg_id,
-                'name': constants.K8S_HARDCODED_SG_NAME}]
-        }
-        self.mox.StubOutWithMock(self.fake_raven.neutron,
-                                 'list_security_groups')
-        self.fake_raven.neutron.list_security_groups(
-            name=constants.K8S_HARDCODED_SG_NAME).AndReturn(fake_sg_response)
-
-        self.mox.StubOutWithMock(self.fake_raven.neutron,
-                                 'create_security_group_rule')
-        sg_rule_req = {
-            'security_group_rule': {
-                'security_group_id': sg_id,
-                'ethertype': 'IPv4',
-                'direction': 'ingress',
-                'remote_ip_prefix': '%s/32' % cluster_ip
-            }
-        }
-        self.fake_raven.neutron.create_security_group_rule(
-            sg_rule_req).AndReturn(None)
 
         self.mox.ReplayAll()
         self.fake_raven._event_loop.run_until_complete(
@@ -866,24 +848,6 @@ class TestK8sServicesWatcher(TestK8sWatchersBase):
         metadata.update({'annotations': annotations})
 
         self.mox.StubOutWithMock(self.fake_raven, 'delegate')
-
-        sg_id = str(uuid.uuid4())
-        fake_sg_response = {
-            'security_groups': [{
-                'id': sg_id,
-                'name': constants.K8S_HARDCODED_SG_NAME}]
-        }
-        self.mox.StubOutWithMock(self.fake_raven.neutron,
-                                 'list_security_groups')
-        self.fake_raven.neutron.list_security_groups(
-            name=constants.K8S_HARDCODED_SG_NAME).AndReturn(fake_sg_response)
-
-        remote_prefix = "%s/32" % fake_vip['address']
-        self.mox.StubOutWithMock(self.fake_raven.neutron,
-                                 'list_security_group_rules')
-        self.fake_raven.neutron.list_security_group_rules(
-            security_group_id=sg_id,
-            remote_ip_prefix=remote_prefix).AndReturn([])
 
         if does_pool_exist:
             fake_vips_response = {'vips': [fake_vip]}

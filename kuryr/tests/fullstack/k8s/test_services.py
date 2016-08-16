@@ -22,7 +22,7 @@ from kuryr.tests.fullstack.k8s import k8s_base_test
 class ServicesTest(k8s_base_test.K8sBaseTest):
 
     def test_create_service(self):
-        num_members = 3
+        num_members = 1
         labels = {'app': 'test_deployment'}
         deployment = self.k8s.create_deployment(
             name='demo-test',
