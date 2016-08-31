@@ -14,6 +14,7 @@
 import abc
 import asyncio
 import ipaddress
+import time
 
 from neutronclient.common import exceptions as n_exceptions
 from oslo_log import log
@@ -96,7 +97,7 @@ def _get_pool_members(pool_members):
 
 
 @asyncio.coroutine
-def _add_pool_member(delegator, client, pool_id, address, protocol_port):
+def _add_pool_member(delegator, client, pool_id, address, protocol_port, subnet_id):
     """Creates an LBaaS member
 
     :param delegator: Object to delegate the creation of the member
@@ -106,13 +107,12 @@ def _add_pool_member(delegator, client, pool_id, address, protocol_port):
     :param port: Protocol port for the LBaaS pool to access the member
     """
     response = yield from delegator(
-        client.create_member,
+        client.create_lbaas_member, pool_id,
         {
             'member': {
-                'pool_id': pool_id,
                 'address': str(address),
                 'protocol_port': protocol_port,
-                'weight': 1,
+                'subnet_id': subnet_id,
             },
         })
     LOG.debug('Successfully created a new member %(member)s for the pool '
@@ -121,7 +121,7 @@ def _add_pool_member(delegator, client, pool_id, address, protocol_port):
 
 
 @asyncio.coroutine
-def _del_pool_member(delegator, client, member_id):
+def _del_pool_member(delegator, client, pool_id, member_id):
     """Creates an LBaaS member
 
     :param delegator: Object to delegate the creation of the member
@@ -129,8 +129,8 @@ def _del_pool_member(delegator, client, member_id):
     :param member_id: uuid object of the pool member to delete
     """
     yield from delegator(
-        client.delete_member,
-        str(member_id))
+        client.delete_lbaas_member,
+        str(member_id), pool_id)
     LOG.debug('Successfully deleted LBaaS pool member %s.', member_id)
 
 
@@ -307,6 +307,7 @@ class K8sPodsWatcher(K8sAPIWatcher):
         LOG.debug("Pod notification %s", decoded_json)
         event_type = decoded_json.get('type', '')
         content = decoded_json.get('object', {})
+        spec = content.get('spec', {})
         metadata = content.get('metadata', {})
         annotations = metadata.get('annotations', {})
         labels = metadata.get('labels', {})
@@ -341,9 +342,12 @@ class K8sPodsWatcher(K8sAPIWatcher):
                     'network_id': namespace_network['id'],
                     'admin_state_up': True,
                     'device_owner': constants.DEVICE_OWNER,
+                    'device_id': metadata.get('uid', ''),
                     'fixed_ips': [{'subnet_id': namespace_subnet['id']}],
                     'security_groups': [sg]
                 }
+                if 'nodeName' in spec:
+                    new_port['binding:host_id'] = spec['nodeName']
                 try:
                     created_port = yield from self.delegate(
                         self.neutron.create_port, {'port': new_port})
@@ -392,18 +396,28 @@ class K8sPodsWatcher(K8sAPIWatcher):
         elif event_type == MODIFIED_EVENT:
             old_port = annotations.get(constants.K8S_ANNOTATION_PORT_KEY)
             if old_port:
+                old_port = jsonutils.loads(old_port)
                 sg = labels.get(constants.K8S_LABEL_SECURITY_GROUP_KEY,
                                 self._default_sg)
-                port_id = jsonutils.loads(old_port)['id']
+                port_id = old_port['id']
                 update_req = {
                     'security_groups': [sg],
                 }
+                if 'nodeName' in spec:
+                    update_req['binding:host_id'] = spec['nodeName']
                 try:
                     updated_port = yield from self.delegate(
                         self.neutron.update_port,
                         port=port_id, body={'port': update_req})
                     port = updated_port['port']
                     LOG.debug("Successfully update a port %s.", port)
+                    if not old_port.get('binding:host_id'):
+                        path = metadata.get('selfLink', '')
+                        annotations.update(
+                            {constants.K8S_ANNOTATION_PORT_KEY: jsonutils.dumps(port)})
+                        if path:
+                            yield from _update_annotation(self.delegate, path, 'Pod',
+                                                          annotations)
                 except n_exceptions.NeutronClientException as ex:
                     with excutils.save_and_reraise_exception():
                         # REVISIT(yamamoto): We ought to report to a user.
@@ -691,8 +705,8 @@ class K8sServicesWatcher(K8sAPIWatcher):
         if event_type == ADDED_EVENT:
             # Ensure the namespace translation is done.
             with (yield from self.namespace_added):
-                if constants.K8S_ANNOTATION_POOL_KEY in annotations:
-                    LOG.debug('Ignore an ADDED event as the pool already has '
+                if constants.K8S_ANNOTATION_LOADBALANCER_KEY in annotations:
+                    LOG.debug('Ignore an ADDED event as the lb already has '
                               'a neutron port')
                     return
                 namespace = metadata.get(
@@ -721,61 +735,61 @@ class K8sServicesWatcher(K8sAPIWatcher):
                 port = service_ports[0]
                 protocol = port['protocol']
                 protocol_port = port['port']
-                pool_request = {
-                    'pool': {
-                        'name': service_name,
-                        'protocol': protocol,
-                        'subnet_id': cluster_subnet['id'],
-                        'lb_method': config.CONF.raven.lb_method,
-                    },
-                }
+                cluster_ip = service_spec['clusterIP']
                 try:
+                    loadbalancer_request = {
+                        'loadbalancer': {
+                            'name': service_name,
+                            'vip_subnet_id': self._service_subnet['id'],
+                            'vip_address': cluster_ip,
+                        }
+                    }
+                    created_lb = yield from self.delegate(
+                        self.neutron.create_loadbalancer,
+                        loadbalancer_request)
+                    lb = created_lb['loadbalancer']
+                    LOG.info('Succeeded to created a LoadBalancer %s', lb)
+                    # FIXME: add proper polling mechanism
+                    time.sleep(30)
+                    listener_request = {
+                        'listener': {
+                            'protocol': protocol,
+                            'protocol_port': protocol_port,
+                            'loadbalancer_id': lb['id'],
+                        }
+                    }
+                    created_lsnr = yield from self.delegate(
+                        self.neutron.create_listener,
+                        listener_request)
+                    lsnr = created_lsnr['listener']
+                    LOG.info('Succeeded to created a Listener %s', lsnr)
+                    # FIXME: add proper polling mechanism
+                    time.sleep(30)
+                    pool_request = {
+                        'pool': {
+                            'protocol': protocol,
+                            'lb_algorithm': config.CONF.raven.lb_method,
+                            'listener_id': lsnr['id'],
+                        }
+                    }
                     created_pool = yield from self.delegate(
-                        self.neutron.create_pool, pool_request)
+                        self.neutron.create_lbaas_pool, pool_request)
                     pool = created_pool['pool']
-                    LOG.debug('Succeeded to created a pool %s', pool)
+                    pool['subnet_id'] = cluster_subnet['id']
+                    LOG.info('Succeeded to created a Pool %s', pool)
+                    # FIXME: add proper polling mechanism
+                    time.sleep(30)
                 except n_exceptions.NeutronClientException as ex:
                     with excutils.save_and_reraise_exception():
                         LOG.error(_LE("Error happened during creating a"
-                                      " Neutron pool: %s"), ex)
+                                      " LoadBalancer: %s"), ex)
 
                 path = metadata.get('selfLink', '')
                 annotations.update(
-                    {constants.K8S_ANNOTATION_POOL_KEY: jsonutils.dumps(pool)})
-
-                pool_id = pool['id']
-                cluster_ip = service_spec['clusterIP']
-                vip_request = {
-                    'vip': {
-                        # name is not necessarily unique and the service name
-                        # is used for the group of the vips.
-                        'name': service_name,
-                        'pool_id': pool_id,
-                        'subnet_id': self._service_subnet['id'],
-                        'address': cluster_ip,
-                        'protocol': protocol,
-                        'protocol_port': protocol_port,
-                    },
-                }
-                try:
-                    created_vip = yield from self.delegate(
-                        self.neutron.create_vip, vip_request)
-                    vip = created_vip['vip']
-                    LOG.debug('Succeeded to created a VIP %s', vip)
-                except n_exceptions.NeutronClientException as ex:
-                    LOG.error(_LE("Error happened during creating a"
-                                  " Neutron VIP: %s"), ex)
-                    try:
-                        yield from self.delegate(
-                            self.neutron.delete_pool, pool_id)
-                    except n_exceptions.NeutronClientException as ex:
-                        LOG.error(
-                            _LE('Error happened during cleaning up a '
-                                'Neutron pool: %s on creating the VIP.'), ex)
-                        raise
-                    raise
-                annotations.update(
-                    {constants.K8S_ANNOTATION_VIP_KEY: jsonutils.dumps(vip)})
+                    {constants.K8S_ANNOTATION_LOADBALANCER_KEY:
+                         jsonutils.dumps(lb),
+                     constants.K8S_ANNOTATION_POOL_KEY:
+                         jsonutils.dumps(pool)})
 
                 # add security group rule in the default security group to
                 # allow access from the VIP to all containers
@@ -813,17 +827,11 @@ class K8sServicesWatcher(K8sAPIWatcher):
 
         elif event_type == DELETED_EVENT:
             with (yield from self.service_deleted):
-                neutron_pool = jsonutils.loads(
-                    annotations.get(constants.K8S_ANNOTATION_POOL_KEY, '{}'))
-                if not neutron_pool:
-                    LOG.debug('Deletion event without neutron pool '
+                neutron_lb = jsonutils.loads(
+                    annotations.get(constants.K8S_ANNOTATION_LOADBALANCER_KEY, '{}'))
+                if not neutron_lb:
+                    LOG.debug('Deletion event without neutron lb '
                               'information. Ignoring it.')
-                    return
-                neutron_vip = jsonutils.loads(
-                    annotations.get(constants.K8S_ANNOTATION_VIP_KEY, '{}'))
-                if not neutron_vip:
-                    LOG.debug('Deletion event without neutron VIP information.'
-                              ' Ignoring it.')
                     return
 
                 # delete security group rule in the default security group for
@@ -836,7 +844,7 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     raise Exception('Security group should be already created'
                                     ' at this point')
 
-                vip_address = '%s/32' % neutron_vip['address']
+                vip_address = '%s/32' % neutron_lb['vip_address']
 
                 sgrs = self.neutron.list_security_group_rules(
                     security_group_id=sg['id'],
@@ -845,42 +853,23 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     sgr = sgrs['security_group_rules'][0]
                     self.neutron.delete_security_group_rule(sgr['id'])
 
-                # VIP should be delete before the pool.
                 try:
-                    vip_id = neutron_vip['id']
-                    neutron_vips_response = yield from self.delegate(
-                        self.neutron.list_vips, id=vip_id)
-                    neutron_vips = neutron_vips_response['vips']
-                    if neutron_vips:
+                    lb_id = neutron_lb['id']
+                    neutron_lbs_response = yield from self.delegate(
+                        self.neutron.list_loadbalancers, id=lb_id)
+                    neutron_lbs = neutron_lbs_response['loadbalancers']
+                    if neutron_lbs:
                         yield from self.delegate(
-                            self.neutron.delete_vip, vip_id)
+                            self.neutron.delete_loadbalancer, lb_id)
                     else:
-                        LOG.warning(_LW("The VIP %s doesn't exist. Ignoring "
-                                        "the deletion of the VIP."), vip_id)
+                        LOG.warning(_LW("The lb %s doesn't exist. Ignoring "
+                                        "the  deletion of the pool."), lb_id)
                 except n_exceptions.NeutronClientException as ex:
                     with excutils.save_and_reraise_exception():
                         LOG.error(_LE("Error happened during deleting a"
-                                      " Neutron VIP: %s"), ex)
-                LOG.debug('Successfully deleted the Neutron VIP %s',
-                          neutron_vip)
-
-                try:
-                    pool_id = neutron_pool['id']
-                    neutron_pools_response = yield from self.delegate(
-                        self.neutron.list_pools, id=pool_id)
-                    neutron_pools = neutron_pools_response['pools']
-                    if neutron_pools:
-                        yield from self.delegate(
-                            self.neutron.delete_pool, pool_id)
-                    else:
-                        LOG.warning(_LW("The pool %s doesn't exist. Ignoring "
-                                        "the  deletion of the pool."), vip_id)
-                except n_exceptions.NeutronClientException as ex:
-                    with excutils.save_and_reraise_exception():
-                        LOG.error(_LE("Error happened during deleting a"
-                                      " Neutron pool: %s"), ex)
-                LOG.debug('Successfully deleted the Neutron pool %s',
-                          neutron_pool)
+                                      " Neutron lb: %s"), ex)
+                LOG.debug('Successfully deleted the Neutron lb %s',
+                          neutron_lb)
                 self.service_deleted.notify()
 
 
@@ -1029,7 +1018,7 @@ class K8sEndpointsWatcher(K8sAPIWatcher):
                                                                      ()))
 
                 members_response = yield from self.sequential_delegate(
-                    self.neutron.list_members, pool_id=pool_id)
+                    self.neutron.list_lbaas_members, lbaas_pool=pool_id)
                 pool_members = _get_pool_members(
                     members_response.get('members', ()))
 
@@ -1039,7 +1028,10 @@ class K8sEndpointsWatcher(K8sAPIWatcher):
                                                     self.neutron,
                                                     pool_id,
                                                     member.address,
-                                                    member.protocol_port)
+                                                    member.protocol_port,
+                                                    pool['subnet_id'])
+                        # FIXME: add proper polling mechanism
+                        time.sleep(30)
                     except n_exceptions.NeutronClientException as ex:
                         with excutils.save_and_reraise_exception():
                             LOG.error(_LE('Error happened creating a Neutron '
@@ -1049,6 +1041,7 @@ class K8sEndpointsWatcher(K8sAPIWatcher):
                     try:
                         yield from _del_pool_member(self.sequential_delegate,
                                                     self.neutron,
+                                                    pool_id,
                                                     member.uuid)
                     except n_exceptions.NeutronClientException as ex:
                         with excutils.save_and_reraise_exception():

@@ -32,6 +32,7 @@ NEUTRON_NAME_OPTION = 'neutron.net.name'
 KURYR_EXISTING_NEUTRON_NET = 'kuryr.net.existing'
 
 K8S_ANNOTATION_POOL_KEY = 'kuryr.org/neutron-pool'
+K8S_ANNOTATION_LOADBALANCER_KEY = 'kuryr.org/neutron-lb'
 K8S_ANNOTATION_PORT_KEY = 'kuryr.org/neutron-port'
 K8S_ANNOTATION_SUBNET_KEY = 'kuryr.org/neutron-subnet'
 K8S_ANNOTATION_NETWORK_KEY = 'kuryr.org/neutron-network'
